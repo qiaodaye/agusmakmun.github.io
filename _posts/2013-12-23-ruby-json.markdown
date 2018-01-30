@@ -1,41 +1,462 @@
 ---
 layout: post
 title:  "Parsing JSON with Ruby"
-date:   2013-12-23 00:18:23 +0700
+date:   2018-01-30 00:18:23 +0700
 categories: [ruby]
 ---
-Parsing JSON with Ruby is actually extremely easy. All you have to do is have the json gem installed (`gem install json`) and call the `JSON.parse` method on the JSON data to convert it to ruby hashes. If you look at this small program here, you can see how I have implemented parsing JSON in Ruby.
+### 管道
 
-{% highlight ruby %}
-#!/usr/bin/env ruby
+管道命令的用处,管道命令是配合多线程一起使用的,使用管道命令可以免于繁琐的上锁以及解锁操作
 
-require 'json'
-require 'net/http'
-require 'libnotify'
+## 1 创建一个管道
 
-def parsejson
-    file = "http://api.openweathermap.org/data/2.5/find?q=London&mode=json"
-    response = Net::HTTP.get_response(URI.parse(file))
-    weatherjson = response.body
-    actual = JSON.parse(weatherjson)
+```c := make(chan int,1)```
+这种是缓冲管道
 
-    # check for errors
-    if actual.has_key? 'Error'
-        raise "error with the url"
-    end
+```  c := make(chan int,1)```
+非缓冲管道
 
-    results = []
+通过观察缓冲管道与非缓冲管道之间的区别是
 
-    actual["list"].each do |listitem|
-        weather = listitem["weather"]
-        weather.each do |weath|
-            results.push(weath["description"])
-        end
-        main = listitem["main"]
-        temp = main["temp"] - 273.15
-        results.push ("%.2f" % temp)
-    end
+是否对管道的容量进行定义,在缓冲管道中可以定义任意容量的管道
+在非缓冲管道中,默认的管道容量为1;
 
-    return results
-end
-{% endhighlight %}
+对于管道的声明可以有两种方式:
+
+```var inChan chan int```//声明int型管道
+
+```a := make(chan int)```//声明int型管道
+
+给管道取别名
+```type IntChan chan int``` //给管道取别名
+
+```c <- 10```
+利用```<-```符号可以对管道写入数据
+这里有个细节就是```c<-```是写入数据而```<-c```是读出数据
+
+
+```package main
+
+import (
+  "fmt"
+  "time"
+)
+
+func main()  {
+  //创建一个管道
+  c := make(chan int,1)
+
+  go func ()  {
+    //从管道里面取值副给a
+    a,ok := <-c //同步
+    fmt.Println(a," ",ok)
+  }()
+  c <- 10
+  time.Sleep(time.Second)
+}
+```
+
+这个小demo中需要我们引起注意的是
+1 对于分线程,如果
+```go func ()  {
+  //从管道里面取值副给a
+  a,ok := <-c //同步
+  fmt.Println(a," ",ok)
+}()```
+
+1
+当主线程运行完后分线程由于运行速度较慢,还未运行,此时程序已经结束
+如果想让分线程的程序按步骤执行完毕,在主线程的末尾加上```time.Sleep(time.Second)
+2
+a,ok :=<-c  读取时,a返回的是读取直,ok返回的是读取是否成功,如果读取成功,返回ture,如果失败返回Flase
+
+
+
+```
+package main
+
+import (
+ "fmt"
+ "time"
+)
+
+func main() {
+
+ // 先创建一个非缓冲管道
+ c := make(chan int)
+
+ go func() { //子线程
+   for i := 0; i < 10; i++ {
+     c <- i //写入数据
+     fmt.Println("写入数据")
+   }
+ }()
+ // 写入数据
+ // 写入数据
+ // 0
+ // 写入数据
+ // 读取数据
+ go func() {
+   for i := 0; i < 10; i++ {
+     fmt.Println(<-c) //读取数据
+     fmt.Println("读取数据")
+   }
+ }()
+
+ time.Sleep(time.Second)
+
+}```
+
+
+这个程序执行出来的结果是
+0
+读取数据
+写入数据
+写入数据
+1
+读取数据
+2
+读取数据
+写入数据
+写入数据
+3
+读取数据
+4
+读取数据
+写入数据
+写入数据
+5
+读取数据
+6
+读取数据
+写入数据
+写入数据
+7
+读取数据
+8
+读取数据
+写入数据
+写入数据
+9
+读取数据
+
+
+这样的显示这是因为,第一个线程写入到0的时候,第二个子线程开始执行读出数据,此时读出0,
+管道内现在不存在数据,此时再执行第一个线程写入数据,当一线程循环到第二次的时候写入1
+第二次写入的时候,再写入的时候由于堵塞没法再写,跳到第二个线程执行....
+
+最后加上休眠,等两个线程都执行完毕!!
+
+```package main
+
+import (
+  "fmt"
+  "time"
+)
+
+func main() {
+	c := make(chan int)
+
+	go func() {
+		for i := 0; i < 10; i++ {
+			fmt.Println("------")
+			c <- i
+		}
+		// close(c)
+	}()
+  time.Sleep(time.Second)
+
+	for n := range c {
+		fmt.Println("++++++++++")
+		fmt.Println(n)
+	}
+  time.Sleep(time.Second)
+
+}
+```
+
+
+跟上个程序的东西差不多,但是这个程序不同的地方是
+```
+close(c)
+}()
+
+
+for n := range c {
+fmt.Println("++++++++++")
+fmt.Println(n)
+}
+```
+
+close 是配合 range 使用的,由于c是非缓冲管道,所以当写入一个数据时候,没办法写入第二个数据了,现在执行主线程的for
+的循环,对c进行读取,这样就可以执行子线程对管道进行写入;
+当子线程循环体执行完之后,执行close  对管道进行关闭
+
+
+
+```
+package main
+
+import (
+	"fmt"
+	"sync"
+)
+
+var wg sync.WaitGroup //队列
+
+func main() {
+
+	// 先创建一个非缓冲管道
+	c := make(chan int)
+	wg.Add(2)
+	go func() { //子线程
+		for i := 0; i < 10; i++ {
+			c <- i //写入数据
+			fmt.Println("写入数据")
+		}
+		wg.Done()
+	}()
+
+	go func() {
+		for i := 0; i < 10; i++ {
+			a := <-c
+			fmt.Println(a) //读取数据
+			fmt.Println("读取数据")
+		}
+		wg.Done()
+	}()
+
+	wg.Wait()
+
+}
+```
+这个代码与上个有异曲同工之妙,先创建一个队列,然后创建两个线程,对  wg.Wait()  等待两个线程执行完毕
+
+
+```
+package main
+
+import "fmt"
+
+func main() {
+	c := make(chan int, 2) //修改2为1就报错，修改2为3可以正常运行
+	c <- 1
+	c <- 2
+	fmt.Println(<-c)
+	fmt.Println(<-c)
+}
+```
+
+c  这个管道容量为2,如果是2的话就不会报错,是1的话,两个数据就写不进去,所以就会报错
+
+
+```
+package main
+
+import "fmt"
+
+func main() {
+	c := make(chan int)
+
+	go func() {
+		for i := 0; i < 10; i++ {
+			fmt.Println("------")
+			c <- i
+		}
+		close(c)
+	}()
+
+	// <-c
+	/*
+		for i := range c能够不断的读取channel里面的数据，直到该channel被显式的关闭。上面代码我们看到可以显式的关闭channel，生产者通过内置函数close关闭channel。关闭channel之后就无法再发送任何数据了，在消费方可以通过语法v, ok := <-ch测试channel是否被关闭。如果ok返回false，那么说明channel已经没有任何数据并且已经被关闭。
+	*/
+	for n := range c {
+		fmt.Println("++++++++++")
+		fmt.Println(n)
+	}
+
+	// num, ok := <-c
+}
+```
+
+这个是实现的代码
+
+```
+package main
+
+import (
+	"fmt"
+	"sync"
+)
+
+func main() {
+
+	c := make(chan int) //创建通道
+
+	var wg sync.WaitGroup //队列
+
+	go func() {
+		fmt.Println("111111111")
+		wg.Add(1)
+		for i := 0; i < 10; i++ {
+			c <- i
+		}
+		wg.Done()
+	}()
+
+	go func() {
+		fmt.Println("22222222")
+		wg.Add(1)
+		for i := 0; i < 10; i++ {
+			c <- i
+		}
+		wg.Done()
+	}()
+
+	go func() {
+		fmt.Println("33333333")
+		wg.Wait()
+		close(c)
+	}()
+
+	for n := range c {
+
+		 <-c  有返回值
+		fmt.Println(n)
+	}
+}
+```
+
+执行的结果是,33333333,是因为前两个线程执行的太慢第三个线程执行完后主线程执行完后就跳出后,所以只打出了33333
+
+
+package main
+
+import (
+	"fmt"
+	"sync"
+)
+
+func main() {
+
+	c := make(chan int) //创建通道
+
+	var wg sync.WaitGroup //队列
+	wg.Add(2)
+	go func() {
+		fmt.Println("111111111")
+
+		for i := 0; i < 10; i++ {
+			c <- i
+		}
+		wg.Done()
+	}()
+
+	go func() {
+		fmt.Println("22222222")
+		for i := 10; i < 20; i++ {
+			c <- i
+		}
+		wg.Done()
+	}()
+
+	go func() {
+		fmt.Println("33333333")
+		wg.Wait()
+		close(c)
+	}()
+
+	for n := range c {
+
+		// <-c  有返回值
+		fmt.Println(n)
+	}
+}
+
+这个函数的执行结果是
+33333333
+111111111
+0
+1
+2
+3
+4
+5
+6
+7
+8
+9
+22222222
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+
+至于为什么这个执行结果是这样因为,队列声明的时候wg.Add(2),每次执行一次分线程数量减1,所以在第三个线程执行完后还会等待浅两个线程进行执行完毕;
+
+
+
+```
+package main
+
+import "fmt"
+
+func main()  {
+  c := make(chan int)
+  done := make(chan bool)
+
+  go func ()  {
+    for i := 0; i < 10; i++ {
+      c <- i
+    }
+    done <- true
+  }()
+
+  go func ()  {
+    for i := 0; i < 10; i++ {
+      c <- i
+    }
+    done <- true
+  }()
+
+  go func() {
+    <- done
+    <- done
+    close(c)
+  }()
+
+for n := range c {
+  fmt.Println(n)
+  }
+}
+```
+
+这个代码的执行的结果
+0
+1
+2
+3
+4
+5
+6
+7
+8
+9
+0
+1
+2
+3
+4
+5
+6
+7
+8
+9
+可以看到这个程序每次分线程执行完后才对done 进行写入,当两个done 同时执行完后,执行close,才保证所有线程执行完毕;
+
